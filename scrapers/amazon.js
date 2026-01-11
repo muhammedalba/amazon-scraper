@@ -1,235 +1,302 @@
-import puppeteer from "puppeteer";
-import {
-  norm,
-  normalizePriceNumber,
-  computeDiscount,
-  pickBestTitle,
-  addAffiliateTag,
-} from "./helpers.js";
+import { getScraperOptions } from "../utils/config.js";
+import { processDeals } from "../utils/dataProcessor.js";
 import { loadSeenAsins, saveSeenAsins } from "../utils/seenAsins.js";
+import { loadLastPosition, saveLastPosition } from "../utils/lastPosition.js";
+import { isCaptchaPage, scrapeVisibleItems } from "./amazonParsers.js";
+import {
+  tryCloseCookieBanner,
+  performInitialScroll,
+  scrollAndWaitForNew,
+} from "./browserActions.js";
+import { launchBrowser, saveCookies, clearCookies } from "./browserSetup.js";
 import "dotenv/config";
+
 const AMAZON_DEALS_URL = process.env.AMAZON_DEALS_URL;
 if (!AMAZON_DEALS_URL) {
   throw new Error("Missing AMAZON_DEALS_URL environment variable.");
 }
 
 /**
- * Fetch Amazon deals.
- * @param {number} limit
- * @param {object} opts - { headless, timeout, retries, slowMo, args, launchTimeout }
+ * Main scraper function that orchestrates the Amazon deals fetching process.
+ *
+ * Workflow:
+ * 1. Launches a stealth browser instance using `browserSetup.js`.
+ * 2. Loads `lastStartIndex` from persistent storage to resume pagination.
+ * 3. Navigates to Amazon deals page using query parameters:
+ *    `?promotionsSearchStartIndex=${startIndex}&promotionsSearchPageSize=${pageSize}`
+ * 4. Collects items on the specific "page".
+ * 5. If successful (items found):
+ *    - Updates `lastStartIndex`.
+ *    - Jumps to the next page index.
+ * 6. If NO items found via pagination (fallback):
+ *    - Reloads the page in "clean" mode (no query params).
+ *    - Uses the traditional "Scroll & Load" method.
+ *
+ * @param {number} limit - Maximum number of new deals to fetch (default: 15).
+ * @param {object} opts - Optional configuration overrides.
+ * @returns {Promise<Array>} List of deal objects.
  */
-export async function fetchAmazonDeals(limit = 10, opts = {}) {
-  const options = {
-    headless: true,
-    timeout: 30000,
-    retries: 2,
-    slowMo: 0,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    launchTimeout: 30000,
-    onlyDiscounts: process.env.AMAZON_ONLY_DISCOUNTS ?? " true",
-    ...opts,
-  };
+export async function fetchAmazonDeals(limit = 60, opts = {}) {
+  const options = getScraperOptions(opts);
+  const pageSize = options.pageSize;
 
   let browser;
   for (let attempt = 0; attempt <= options.retries; attempt++) {
     try {
-      browser = await puppeteer.launch({
-        headless: options.headless,
-        args: options.args,
-        slowMo: options.slowMo,
-        timeout: options.launchTimeout,
-      });
+      const setup = await launchBrowser(options);
+      browser = setup.browser;
+      const page = setup.page;
 
-      const page = await browser.newPage();
-
-      const USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36";
-
-      // Avoid deprecated page.setUserAgent — set headers and inject navigator.userAgent
-      await page.setExtraHTTPHeaders({
-        "accept-language": "en-US,en;q=0.9,de;q=0.8",
-        "user-agent": USER_AGENT,
-      });
-
-      await page.evaluateOnNewDocument((ua) => {
-        try {
-          Object.defineProperty(navigator, "userAgent", {
-            get: () => ua,
-            configurable: true,
-          });
-        } catch (e) {
-          // ignore
-        }
-      }, USER_AGENT);
-      await page.setViewport({ width: 1366, height: 768 });
-
-      await page.goto(AMAZON_DEALS_URL, {
-        waitUntil: "networkidle2",
-        timeout: options.timeout,
-      });
-
-      await page.waitForSelector("div[data-asin]", { timeout: 10000 });
-
-      // Try to auto-scroll / paginate so more deal items load (Amazon lazy-loads)
-      try {
-        const maxScrollTime = 15000; // ms
-        const start = Date.now();
-        while (Date.now() - start < maxScrollTime) {
-          const count = await page.evaluate(
-            () =>
-              document.querySelectorAll('div[data-asin]:not([data-asin=""])')
-                .length
-          );
-          if (count >= limit) break;
-          await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-          await new Promise((r) => setTimeout(r, 700));
-        }
-      } catch (e) {
-        // continue even if scrolling fails
-      }
-
-      // ASIN-aware iterative collection with deduplication across runs
-      // JSON-only backend: load and save using utils/seenAsins.js
-      const seenFile = options.seenAsinsPath; // optional path provided via opts
+      const seenFile = options.seenAsinsPath || process.env.SEEN_ASINS_PATH;
       const seenSet = await loadSeenAsins(seenFile);
+
+      const lastPosFile =
+        options.lastPositionPath || process.env.LAST_POSITION_PATH;
+      const lastPos = loadLastPosition(lastPosFile);
+      
+      // Load last start index, default to 0
+      let startIndex = lastPos?.lastStartIndex || 0;
+      // Also load last ASIN for the URL param
+      let lastSeenAsin = lastPos?.lastAsin || null;
+      
+      let usedFallback = false;
+      let consecutiveZeroResults = 0; // Track consecutive empty/bad pages across pagination
 
       const collected = [];
       const collectedAsins = new Set();
+      
+      console.log(`debug: starting at pagination index: ${startIndex}, lastAsin: ${lastSeenAsin}`);
 
-      let consecutiveNoNew = 0;
-      const maxNoNew = options.maxNoNew ?? 5; // stop if no new ASINs appear this many times
-      let scrollAttempts = 0;
-      const maxScrollAttempts = options.maxScrollAttempts ?? 30; // failsafe max scrolls
+      // PAGINATION LOOP
+      // We try to fetch 'limit' items. In pagination mode, we might need to jump multiple pages.
+      const maxPagesToCheck = 5; // safety breakdown to avoid infinite loops
+      let pagesChecked = 0;
 
-      // Repeatedly read visible items, skipping ASINs already seen, until we
-      // collect `limit` new ASINs, or stop conditions triggered.
-      // Note: do NOT use `slice(0, limit)` inside `page.evaluate` — that would
-      // return only the first N items currently visible in the DOM. On
-      // infinite-scroll pages Amazon lazy-loads items as you scroll; slicing
-      // early prevents discovering newly-loaded items. Instead we drive the
-      // scrolling from Node and assemble new unique ASINs across multiple
-      // DOM snapshots.
-      while (
-        collected.length < limit &&
-        scrollAttempts < maxScrollAttempts &&
-        consecutiveNoNew < maxNoNew
-      ) {
-        const items = await page.evaluate(() => {
-          const nodes = Array.from(
-            document.querySelectorAll('div[data-asin]:not([data-asin=""])')
-          );
-          return nodes.map((el) => {
-            const asin = el.getAttribute("data-asin") || null;
-            const imgEl = el.querySelector("img");
-            const linkEl =
-              el.querySelector("h2 a") || el.querySelector("a.a-link-normal");
-            const imgAlt = imgEl?.alt?.trim() || null;
-            const linkTitle = linkEl?.title?.trim() || null;
-            const h2Span =
-              el.querySelector("h2 a span")?.textContent?.trim() || null;
-            const h2Text = el.querySelector("h2")?.textContent?.trim() || null;
-            const offscreenEls = Array.from(el.querySelectorAll(".a-offscreen"))
-              .map((n) => n.textContent?.trim())
-              .filter(Boolean);
-            const priceRaw = offscreenEls[0] || null;
-            const oldPriceRaw =
-              offscreenEls[1] ||
-              el.querySelector(".a-text-strike")?.textContent?.trim() ||
-              null;
-            let link = linkEl?.href || null;
-            if (link && link.startsWith("/")) {
-              try {
-                link = new URL(link, location.origin).href;
-              } catch {}
-            }
-            return {
-              asin,
-              imgAlt,
-              linkTitle,
-              h2Span,
-              h2Text,
-              priceRaw,
-              oldPriceRaw,
-              image: imgEl?.src || null,
-              link,
-            };
-          });
+      while (collected.length < limit && pagesChecked < maxPagesToCheck) {
+        if (usedFallback) break; // If we switched to fallback, handle it outside this loop
+
+        // Construct Paginated URL
+        // Structure: ?promotionsSearchLastSeenAsin=...&promotionsSearchStartIndex=...&promotionsSearchPageSize=...
+        let paginatedUrl = `${AMAZON_DEALS_URL}?promotionsSearchStartIndex=${startIndex}&promotionsSearchPageSize=${pageSize}`;
+        if (lastSeenAsin) {
+            paginatedUrl += `&promotionsSearchLastSeenAsin=${lastSeenAsin}`;
+        }
+        
+        console.log(`debug: navigating to ${paginatedUrl}`);
+
+        await page.goto(paginatedUrl, {
+          waitUntil: "networkidle2",
+          timeout: options.timeout,
         });
 
-        let foundNewThisRound = 0;
-        for (const it of items) {
-          if (!it.asin || !it.link) continue;
-          if (seenSet.has(it.asin) || collectedAsins.has(it.asin)) continue;
-          collected.push(it);
-          collectedAsins.add(it.asin);
-          foundNewThisRound++;
-          if (collected.length >= limit) break;
+        if (await isCaptchaPage(page)) {
+            console.warn("⚠️ Amazon Captcha detected!");
+            await page.screenshot({ path: "captcha_detected.png" });
+            
+            // If we hit a captcha, it's a strong signal to clear cookies for next time
+            console.warn("🧹 Clearing cookies due to CAPTCHA...");
+            await clearCookies();
+            
+            // Wait / break
+            await new Promise((r) => setTimeout(r, 2000));
+            // We might want to abort this run or try to reload clean
+            // For now, let's break, process what we have (if any), and let the next run start fresh
+            break; 
         }
 
-        if (foundNewThisRound === 0) {
-          consecutiveNoNew++;
+        await page.waitForSelector('body'); // Wait for body at least
+
+        // STRATEGY: Full Page Sweep
+        // Scroll gradually from Top to Footer to ensure ALL lazy items load on this pagination index.
+        console.log("debug: performing full page scroll sweep...");
+        
+        await page.evaluate(async () => {
+            const getFooterTop = () => {
+                const f = document.getElementById("navFooter") || document.querySelector("footer") || document.querySelector(".navLeftFooter") || document.querySelector("#rhf");
+                return f ? f.getBoundingClientRect().top + window.scrollY : document.body.scrollHeight;
+            };
+
+            const viewHeight = window.innerHeight;
+            let currentScroll = window.scrollY;
+            let footerTop = getFooterTop();
+            let maxScroll = Math.max(0, footerTop - viewHeight - 100); // Stop just before footer
+
+            while (currentScroll < maxScroll) {
+                // Scroll step
+                window.scrollBy(0, 600);
+                await new Promise(r => setTimeout(r, 800)); // wait for render
+                
+                // Recalculate limits (content might have expanded)
+                currentScroll = window.scrollY;
+                footerTop = getFooterTop();
+                maxScroll = Math.max(0, footerTop - viewHeight - 100);
+                
+                // Check for "View More" button and click if visible
+                const buttons = Array.from(document.querySelectorAll('a, button, span'));
+                const target = buttons.find(el => {
+                    const t = el.textContent?.trim().toLowerCase() || "";
+                    return (t === "view more deals" || t === "see more deals" || t === "load more");
+                });
+                if (target && target.offsetParent !== null) {
+                    target.click();
+                    await new Promise(r => setTimeout(r, 2000)); // wait for load after click
+                }
+            }
+        });
+
+        // Wait a final moment for any last renders
+        await new Promise(r => setTimeout(r, 1000));
+        
+        const items = await page.evaluate(scrapeVisibleItems);
+        const validItems = items.filter(it => it.asin && it.link);
+        
+        console.log(`debug: page index ${startIndex} returned ${validItems.length} valid items.`);
+
+        if (validItems.length === 0) {
+            console.log("debug: pagination yielded 0 items. Switching to fallback scroll mode.");
+            consecutiveZeroResults++;
+            usedFallback = true;
+            break;
         } else {
-          consecutiveNoNew = 0;
+             consecutiveZeroResults = 0;
         }
 
-        if (collected.length >= limit) break;
+        let newInThisPage = 0;
+        for (const it of validItems) {
+            if (seenSet.has(it.asin) || collectedAsins.has(it.asin)) continue;
+            collected.push(it);
+            collectedAsins.add(it.asin);
+            newInThisPage++;
+            if (collected.length >= limit) break;
+        }
+        
+        console.log(`debug: collected ${newInThisPage} new items from this page.`);
 
-        // scroll to load more items and wait a moment
-        try {
-          await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-        } catch (e) {}
-        await new Promise((r) => setTimeout(r, 700));
-        scrollAttempts++;
+        // If we found items (old or new), we assume pagination is working.
+        // Increment index for NEXT run or next iteration
+        startIndex += pageSize; 
+        
+        // Update lastSeenAsin for the next iteration (URL construction)
+        if (validItems.length > 0) {
+            lastSeenAsin = validItems[validItems.length - 1].asin;
+        }
+
+        pagesChecked++;
+        
+        // Save intermediate progress (lastStartIndex) immediately?
+        // Or wait until end. Let's wait until success to save persistent state.
       }
 
-      // Persist newly seen ASINs (best-effort)
+
+      // FAILSAFE / FALLBACK MODE (Scroll based)
+      // If pagination didn't give us enough items (or failed completely), reopen standard URL and scroll
+      if ((collected.length < limit && usedFallback) || (collected.length === 0 && pagesChecked > 0)) {
+         console.log("🔄 Fallback: Switching to infinite scroll mode...");
+         
+         // Navigate to base URL (clean)
+         await page.goto(AMAZON_DEALS_URL, { waitUntil: "networkidle2", timeout: options.timeout });
+         await tryCloseCookieBanner(page);
+         await performInitialScroll(page, limit);
+
+         let consecutiveNoNew = 0;
+         let scrollAttempts = 0;
+         let zeroVisibleCount = 0;
+         
+         // We might have some 'collected' items from pagination (if it partially worked), keep them.
+         
+         while (
+            collected.length < limit &&
+            scrollAttempts < options.maxScrollAttempts &&
+            consecutiveNoNew < options.maxNoNew
+          ) {
+             // ... existing scroll logic ...
+            try {
+              const visibleCount = await page.evaluate(
+                () => document.querySelectorAll('div[data-asin]:not([data-asin=""])').length
+              );
+              if (visibleCount === 0) zeroVisibleCount++;
+              else zeroVisibleCount = 0;
+
+              if (zeroVisibleCount >= Math.max(2, options.maxReloads)) {
+                 await page.reload({ waitUntil: "networkidle2" });
+                 await tryCloseCookieBanner(page);
+                 zeroVisibleCount = 0;
+              }
+            } catch(e) {}
+
+            const scrollItems = await page.evaluate(scrapeVisibleItems);
+            let foundNew = 0;
+            for (const it of scrollItems) {
+                if (!it.asin || !it.link) continue;
+                if (seenSet.has(it.asin) || collectedAsins.has(it.asin)) continue;
+                collected.push(it);
+                collectedAsins.add(it.asin);
+                foundNew++;
+                if (collected.length >= limit) break;
+            }
+
+            if (foundNew === 0) consecutiveNoNew++;
+            else consecutiveNoNew = 0;
+
+            if (collected.length >= limit) break;
+
+            try {
+                const prevVis = await page.evaluate(() => document.querySelectorAll('div[data-asin]:not([data-asin=""])').length);
+                await scrollAndWaitForNew(page, options, prevVis);
+            } catch(e) {}
+            scrollAttempts++;
+          }
+      }
+
+      // FINALIZATION
+      // Update Seen ASINS
       for (const a of collectedAsins) seenSet.add(a);
       await saveSeenAsins(seenSet, seenFile);
+      
+      // Update Cookies (only if we didn't just clear them due to fatal errors)
+      // If we cleared cookies mid-run, we probably don't want to save the current session unless we successfully recovered.
+      await saveCookies(page);
 
-      // Post-process collected items in Node using helpers
-      const processed = collected.slice(0, limit).map((it) => {
-        const title = pickBestTitle({
-          imgAlt: it.imgAlt,
-          linkTitle: it.linkTitle,
-          h2Span: it.h2Span,
-          h2Text: it.h2Text,
-        });
-        const currentNum = normalizePriceNumber(it.priceRaw);
-        const oldNum = normalizePriceNumber(it.oldPriceRaw);
-        const discount = computeDiscount(oldNum, currentNum);
-        const affiliateTag = process.env.AMAZON_TAG;
-        const linkWithTag = addAffiliateTag(it.link, affiliateTag);
-        return {
-          title: title ? norm(title) : null,
-          price: currentNum != null ? String(currentNum) : null,
-          old_price: oldNum != null ? String(oldNum) : null,
-          discount: discount,
-          link: linkWithTag,
-          image: it.image,
-          source: "amazon",
-          posted: "no",
-        };
-      });
+      // Save Last Position
+      // Only update Pagination Index if we actually used it successfully without falling back.
+      // If we used Fallback, it means pagination failed, so we shouldn't overwrite the index with a potentially stuck value.
+      if (!usedFallback) {
+          await saveLastPosition({ 
+              lastStartIndex: startIndex, 
+              lastAsin: collected.length > 0 ? collected[collected.length-1].asin : null 
+            }, lastPosFile);
+            console.log(`✅ Saved next pagination index: ${startIndex}`);
+      } else {
+           // We used Fallback logic because pagination failed for this index (e.g. index 0 returned empty).
+           // However, if we successfully collected items via scroll (Fallback), we should probably 
+           // ADVANCE the startIndex anyway, so we don't get stuck retrying index 0 forever.
+           // Let's assume we "consumed" a page worth of items.
+           if (collected.length > 0) {
+               // Update index by pageSize (or at least collected length)
+               const nextIndex = startIndex + pageSize; 
+               await saveLastPosition({ 
+                  lastAsin: collected[collected.length-1].asin,
+                  lastStartIndex: nextIndex 
+                }, lastPosFile);
+                console.log(`✅ Saved next pagination index: ${nextIndex} (via Fallback success)`);
+           }
+      }
 
-      const deals = options.onlyDiscounts
-        ? processed.filter((it) => it.discount)
-        : processed;
+      if (consecutiveZeroResults > 0) {
+          // If we failed to get anything even with fallback, clearing cookies might be wise for next time
+           console.warn("🧹 Clearing cookies due to zero results/fallback failure...");
+           await clearCookies();
+      }
 
       await browser.close();
-      return deals.slice(0, limit);
+      return processDeals(collected, limit, options.onlyDiscounts);
+
     } catch (err) {
-      if (browser) {
-        try {
-          await browser.close();
-        } catch {}
-      }
-      if (attempt === options.retries) {
-        throw err;
-      }
+      if (browser) await browser.close().catch(() => {});
+      if (attempt === options.retries) throw err;
       await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
     }
   }
-
   return [];
 }
 

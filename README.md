@@ -1,31 +1,45 @@
-(Project README)
+# Amazon Deals Scraper
+A stealthy, modular, and persistent Amazon deals scraper built with Node.js and Puppeteer.
 
-## Usage
+## ✨ Features
+- **Stealth Mode**: Uses `puppeteer-extra-plugin-stealth` to evade bot detection.
+- **Smart Scrolling**: Implements footer-aware incremental scrolling to handle Amazon's lazy-loading.
+- **Persistence**: Remembers seen ASINs (`seen_asins.json`) and last scroll position to work efficiently as a cron job.
+- **Auto-Cookie Management**: Saves and loads cookies to maintain session state.
+- **Google Sheets Integration**: Automatically saves fetched deals to a Google Sheet.
 
-- Run the scraper:
+## 🚀 Installation
 
 ```bash
-node cron/fetchAmazonDeals.js
+npm install
 ```
 
-- Clear persisted seen ASINs (resets deduplication state):
+## ⚙️ Configuration (.env)
+Create a `.env` file in the root directory.
 
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `AMAZON_DEALS_URL` | **Required**. Full URL to the Amazon deals page. | - |
+| `AMAZON_FETCH_LIMIT` | Number of **new** items to fetch per run. | `15` |
+| `AMAZON_TAG` | Your Amazon Affiliate Tag (optional). | - |
+| `AMAZON_ONLY_DISCOUNTS`| Save only items with a discount? (`true`/`false`) | `true` |
+| `SPREADSHEET_ID` | Google Sheet ID to save data to. | - |
+| `GOOGLE_CREDS_JSON` | Path to your Service Account JSON key. | `credentials.json` |
+| `PUPPETEER_HEADLESS` | Run browser in background? (`true`/`false`) | `true` |
+| `AMAZON_SCROLL_DELAY_MS`| Wait time (ms) between scrolls. | `1500` |
+| `AMAZON_MAX_RELOADS` | Max page reloads if no items found. | `3` |
+
+## ▶️ Usage
+
+Run the scraper manually or schedule it:
 ```bash
-node cron/clearSeenAsins.js
-# or
-npm run clear-seen
+npm start
 ```
+(This runs `node cron/fetchAmazonDeals.js`)
 
-## Persistence (seen ASINs)
-
-- The project uses a JSON file `seen_asins.json` to persist ASINs seen in previous runs.
-- Helpers are in `utils/seenAsins.js`:
-  - `loadSeenAsins([path])` — returns a `Set` of ASINs.
-  - `saveSeenAsins(set, [path])` — persists the `Set` to JSON (best-effort).
-  - `clearSeenAsins([path])` — overwrite the JSON with an empty array.
-
-## Notes
-
-- The scraper implements an ASIN-aware infinite-scroll strategy: it repeatedly scrolls the page, samples visible product nodes (`div[data-asin]`), and collects new ASINs until `limit` new items are gathered or stop conditions are met.
-- Do NOT use `slice(0, limit)` inside `page.evaluate` on infinite-scroll pages — slicing too early will only return the first visible items and miss lazily-loaded products.
-  -- If you later need a stronger persistence backend (Redis), you can add a backend module and switch `opts.seenBackend` in `scrapers/amazon.js`.
+## 📂 Project Structure
+- `scrapers/amazon.js`: Main controller logic.
+- `scrapers/browserActions.js`: Browser interactions (scroll, cookies).
+- `scrapers/browserSetup.js`: Puppeteer configuration & launch.
+- `scrapers/amazonParsers.js`: DOM extraction logic.
+- `utils/`: Helper functions and configuration.
