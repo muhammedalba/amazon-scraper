@@ -177,9 +177,29 @@ export async function fetchAmazonDeals(limit = 60, opts = {}) {
         startIndex += pageSize; 
         
         // Update lastSeenAsin for the next iteration (URL construction)
+        let newLastAsin = lastSeenAsin;
         if (validItems.length > 0) {
-            lastSeenAsin = validItems[validItems.length - 1].asin;
+            newLastAsin = validItems[validItems.length - 1].asin;
         }
+
+        // STUCK CHECK: If the last ASIN didn't change despite moving to a new page, 
+        // it means we are just seeing the same static content (footer/recommendations) over and over.
+        // We reached the end of the real list.
+        if (newLastAsin === lastSeenAsin && collected.length < limit) {
+             console.log("ℹ️ Last ASIN did not change. We likely reached the end of the list.");
+             console.log("🔄 Resetting position to start from beginning next time.");
+             // Reset position to 0 so next run starts fresh
+             await saveLastPosition({ 
+                lastStartIndex: 0, 
+                lastAsin: null 
+             }, lastPosFile);
+             
+             // We also want to stop saving the 'current' high index later in the code
+             // So we can return here or set a flag
+             usedFallback = true; // reusing this flag to skip the final save logic
+             break;
+        }
+        lastSeenAsin = newLastAsin;
 
         pagesChecked++;
         
