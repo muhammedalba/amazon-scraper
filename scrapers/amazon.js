@@ -234,15 +234,3 @@ export async function fetchAmazonDeals(limit = 10, opts = {}) {
 }
 
 export default fetchAmazonDeals;
-
-/*
-Example usage (keep commented to avoid auto-run):
-(async () => {
-  try {
-    const deals = await fetchAmazonDeals(10, { headless: true, retries: 2 });
-    console.log(deals);
-  } catch (e) {
-    console.error('Failed to fetch deals:', e);
-  }
-})();
-*/
