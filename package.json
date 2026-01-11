@@ -2,7 +2,8 @@
   "name": "amazon-scraper",
   "type": "module",
   "scripts": {
-    "start": "node cron/fetchAmazonDeals.js"
+    "start": "node cron/fetchAmazonDeals.js",
+    "clear-seen": "node cron/clearSeenAsins.js"
   },
   "dependencies": {
     "axios": "^1.13.2",
