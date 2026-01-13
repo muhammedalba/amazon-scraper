@@ -3,7 +3,10 @@ import path from "path";
 import crypto from "crypto";
 
 function loadGoogleCreds() {
-  const envVal = process.env.GOOGLE_CREDS_JSON;
+  const envVal =
+    process.env.ENVIRONMENT === "production"
+      ? process.env.GOOGLE_CREDS_JSON
+      : process.env.GOOGLE_CREDS_JSON_PATH;
   if (envVal) {
     // If it looks like JSON, parse it
     try {
@@ -123,7 +126,7 @@ export async function saveDealsToSheet(deals) {
 
   // Sheet columns: id, title, price, old_price, discount, link, posted, image_url, source
   const values = deals.map((d) => [
-    "", // id (leave blank for auto/id handled in sheet)
+    // "",  id (leave blank for auto/id handled in sheet)
     d.title || "",
     d.price || "",
     d.old_price || "",

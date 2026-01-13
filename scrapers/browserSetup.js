@@ -47,9 +47,9 @@ export async function saveCookies(page) {
 
 export async function clearCookies() {
   try {
-    await fs.unlink(COOKIES_PATH);
-    console.log("🧹 Cookies file deleted.");
+    await fs.writeFile(COOKIES_PATH, JSON.stringify([], null, 2));
+    console.log("🧹 Cookies file cleared (emptied).");
   } catch (e) {
-    // ignore if file doesn't exist
+    console.warn("warn: failed clearing cookies file", e.message);
   }
 }

@@ -2,17 +2,18 @@ import dotenv from "dotenv";
 import { fetchAmazonDeals } from "../scrapers/amazon.js";
 import { saveDealsToSheet } from "../google/sheets.js";
 import { saveLastPosition } from "../utils/lastPosition.js";
+import { checkAndClearExcessiveAsins } from "../utils/seenAsins.js";
 
 dotenv.config();
 
 (async () => {
   try {
     console.log("🔄 Fetching Amazon deals...");
+    
+    // Check if we need to clear logs before starting
+    await checkAndClearExcessiveAsins(process.env.SEEN_ASINS_PATH);
     // Read env / defaults
-    const onlyDiscounts =
-      (process.env.AMAZON_ONLY_DISCOUNTS || process.env.ONLY_DISCOUNTS || "")
-        .toString()
-        .toLowerCase() === "true";
+    const onlyDiscounts = process.env.AMAZON_ONLY_DISCOUNTS ?? "true";
 
     const fetchLimit = process.env.AMAZON_FETCH_LIMIT
       ? parseInt(process.env.AMAZON_FETCH_LIMIT, 10)

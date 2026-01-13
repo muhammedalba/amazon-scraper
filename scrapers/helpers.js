@@ -51,6 +51,7 @@ export function addAffiliateTag(rawUrl, tag) {
 
     // إضافة أو تعديل tag
     u.searchParams.set("tag", tag);
+    u.searchParams.set("linkCode", "ll1");
 
     return u.toString();
   } catch (e) {

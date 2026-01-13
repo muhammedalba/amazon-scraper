@@ -22,8 +22,8 @@ export function processDeals(collectedItems, limit, onlyDiscounts) {
     return {
       asin: it.asin || null,
       title: title ? norm(title) : null,
-      price: currentNum != null ? String(currentNum) : null,
-      old_price: oldNum != null ? String(oldNum) : null,
+      price: currentNum != null ? currentNum.toFixed(2) : null,
+      old_price: oldNum != null ? oldNum.toFixed(2) : null,
       discount: discount,
       link: linkWithTag,
       image: it.image,
