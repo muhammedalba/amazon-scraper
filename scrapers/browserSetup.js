@@ -10,7 +10,7 @@ const COOKIES_PATH = path.resolve("cookies.json");
 export async function launchBrowser(options) {
   const browser = await puppeteer.launch({
     headless: options.headless,
-    args: options.args,
+    args: [...(options.args || []), "--no-sandbox", "--disable-setuid-sandbox"],
     slowMo: options.slowMo,
     timeout: options.launchTimeout,
   });
