@@ -67,7 +67,7 @@ export async function clearSeenAsins(filePath) {
  */
 export async function checkAndClearExcessiveAsins(seenAsinsPath) {
   const seenSet = await loadSeenAsins(seenAsinsPath);
-  if (seenSet.size > 50) {
+  if (seenSet.size > 300) {
     console.log(`⚠️ Seen ASINs count (${seenSet.size}) exceeds 400. Performing automatic cleanup...`);
     
     // 1. Clear seen_asins.json
