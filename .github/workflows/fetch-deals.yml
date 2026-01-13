@@ -1,0 +1,48 @@
+name: Fetch Amazon Deals
+
+# متى يعمل
+on:
+  schedule:
+    - cron: '0 * * * *' 
+  workflow_dispatch: # لتشغيله يدويًا من GitHub أيضًا
+
+jobs:
+  fetch-deals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20' # اختر نسخة Node المناسبة
+
+      - name: Install dependencies
+        run: npm install
+                
+      - name: Install Puppeteer browser
+        run: npm run build
+
+      - name: Run fetch script
+        run: node cron/fetchAmazonDeals.js
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          ENVIRONMENT: ${{ secrets.ENVIRONMENT}}
+          AMAZON_DEALS_URL: ${{ secrets.AMAZON_DEALS_URL }}
+          AMAZON_FETCH_LIMIT: ${{ secrets.AMAZON_FETCH_LIMIT }}
+          AMAZON_MAX_SCROLL_ATTEMPTS: ${{ secrets.AMAZON_MAX_SCROLL_ATTEMPTS}}
+          AMAZON_MAX_NO_NEW: ${{ secrets.AMAZON_MAX_NO_NEW}}
+          AMAZON_SCROLL_DELAY_MS: ${{ secrets.AMAZON_SCROLL_DELAY_MS}}
+          AMAZON_ONLY_DISCOUNTS: ${{ secrets.AMAZON_ONLY_DISCOUNTS}}
+          AMAZON_TAG: ${{ secrets.AMAZON_TAG}}
+          SEEN_ASINS_PATH: ${{ secrets.SEEN_ASINS_PATH}}
+          LAST_POSITION_PATH: ${{ secrets.LAST_POSITION_PATH}}
+          PUPPETEER_HEADLESS: ${{ secrets.PUPPETEER_HEADLESS}}
+          LAUNCH_TIMEOUT: ${{ secrets.LAUNCH_TIMEOUT}}
+          LAUNCH_RETRIES: ${{ secrets.LAUNCH_RETRIES}}
+          SPREADSHEET_ID : ${{ secrets.SPREADSHEET_ID}}
+          GOOGLE_CREDS_JSON_PATH: ${{ secrets.GOOGLE_CREDS_JSON_PATH}}
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON}}  
